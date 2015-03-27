@@ -1,0 +1,4 @@
+origin	git@github.com:skyportsystems/pq (fetch)
+origin	git@github.com:skyportsystems/pq (push)
+upstream	https://github.com/lib/pq.git (fetch)
+upstream	https://github.com/lib/pq.git (push)
