@@ -7,13 +7,17 @@ import (
 	"bytes"
 	"database/sql"
 	"database/sql/driver"
-	"github.com/lib/pq/oid"
 	"io"
+	"math/rand"
 	"net"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/lib/pq/oid"
 )
 
 var (
@@ -32,7 +36,6 @@ func BenchmarkSelectSeries(b *testing.B) {
 }
 
 func benchQuery(b *testing.B, query string, result interface{}) {
-	b.Skip("current pq database-backed benchmarks are inconsistent")
 	b.StopTimer()
 	db := openTestConn(b)
 	defer db.Close()
@@ -180,7 +183,6 @@ func BenchmarkPreparedSelectSeries(b *testing.B) {
 }
 
 func benchPreparedQuery(b *testing.B, query string, result interface{}) {
-	b.Skip("current pq database-backed benchmarks are inconsistent")
 	b.StopTimer()
 	db := openTestConn(b)
 	defer db.Close()
@@ -282,27 +284,32 @@ func benchPreparedMockQuery(b *testing.B, c *conn, stmt driver.Stmt) {
 
 func BenchmarkEncodeInt64(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		encode(int64(1234), oid.T_int8)
+		encode(&parameterStatus{}, int64(1234), oid.T_int8)
 	}
 }
 
 func BenchmarkEncodeFloat64(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		encode(3.14159, oid.T_float8)
+		encode(&parameterStatus{}, 3.14159, oid.T_float8)
 	}
 }
 
 var testByteString = []byte("abcdefghijklmnopqrstuvwxyz")
 
-func BenchmarkEncodeBytea(b *testing.B) {
+func BenchmarkEncodeByteaHex(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		encode(testByteString, oid.T_bytea)
+		encode(&parameterStatus{serverVersion: 90000}, testByteString, oid.T_bytea)
+	}
+}
+func BenchmarkEncodeByteaEscape(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		encode(&parameterStatus{serverVersion: 84000}, testByteString, oid.T_bytea)
 	}
 }
 
 func BenchmarkEncodeBool(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		encode(true, oid.T_bool)
+		encode(&parameterStatus{}, true, oid.T_bool)
 	}
 }
 
@@ -310,7 +317,7 @@ var testTimestamptz = time.Date(2001, time.January, 1, 0, 0, 0, 0, time.Local)
 
 func BenchmarkEncodeTimestamptz(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		encode(testTimestamptz, oid.T_timestamptz)
+		encode(&parameterStatus{}, testTimestamptz, oid.T_timestamptz)
 	}
 }
 
@@ -318,7 +325,7 @@ var testIntBytes = []byte("1234")
 
 func BenchmarkDecodeInt64(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		decode(testIntBytes, oid.T_int8)
+		decode(&parameterStatus{}, testIntBytes, oid.T_int8)
 	}
 }
 
@@ -326,7 +333,7 @@ var testFloatBytes = []byte("3.14159")
 
 func BenchmarkDecodeFloat64(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		decode(testFloatBytes, oid.T_float8)
+		decode(&parameterStatus{}, testFloatBytes, oid.T_float8)
 	}
 }
 
@@ -334,7 +341,7 @@ var testBoolBytes = []byte{'t'}
 
 func BenchmarkDecodeBool(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		decode(testBoolBytes, oid.T_bool)
+		decode(&parameterStatus{}, testBoolBytes, oid.T_bool)
 	}
 }
 
@@ -351,8 +358,59 @@ var testTimestamptzBytes = []byte("2013-09-17 22:15:32.360754-07")
 
 func BenchmarkDecodeTimestamptz(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		decode(testTimestamptzBytes, oid.T_timestamptz)
+		decode(&parameterStatus{}, testTimestamptzBytes, oid.T_timestamptz)
 	}
+}
+
+func BenchmarkDecodeTimestamptzMultiThread(b *testing.B) {
+	oldProcs := runtime.GOMAXPROCS(0)
+	defer runtime.GOMAXPROCS(oldProcs)
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	globalLocationCache = newLocationCache()
+
+	f := func(wg *sync.WaitGroup, loops int) {
+		defer wg.Done()
+		for i := 0; i < loops; i++ {
+			decode(&parameterStatus{}, testTimestamptzBytes, oid.T_timestamptz)
+		}
+	}
+
+	wg := &sync.WaitGroup{}
+	b.ResetTimer()
+	for j := 0; j < 10; j++ {
+		wg.Add(1)
+		go f(wg, b.N/10)
+	}
+	wg.Wait()
+}
+
+func BenchmarkLocationCache(b *testing.B) {
+	globalLocationCache = newLocationCache()
+	for i := 0; i < b.N; i++ {
+		globalLocationCache.getLocation(rand.Intn(10000))
+	}
+}
+
+func BenchmarkLocationCacheMultiThread(b *testing.B) {
+	oldProcs := runtime.GOMAXPROCS(0)
+	defer runtime.GOMAXPROCS(oldProcs)
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	globalLocationCache = newLocationCache()
+
+	f := func(wg *sync.WaitGroup, loops int) {
+		defer wg.Done()
+		for i := 0; i < loops; i++ {
+			globalLocationCache.getLocation(rand.Intn(10000))
+		}
+	}
+
+	wg := &sync.WaitGroup{}
+	b.ResetTimer()
+	for j := 0; j < 10; j++ {
+		wg.Add(1)
+		go f(wg, b.N/10)
+	}
+	wg.Wait()
 }
 
 // Stress test the performance of parsing results from the wire.
